@@ -252,10 +252,59 @@ class nccl_net_ofi_rdma_device_rail_t;
 class nccl_net_ofi_rdma_domain_rail_t;
 class nccl_net_ofi_rdma_ep_rail_t;
 
-struct nccl_net_ofi_rdma_req;
-typedef struct nccl_net_ofi_rdma_req nccl_net_ofi_rdma_req_t;
+/*
+ * Forward declaration for the base request class
+ */
+class nccl_net_ofi_rdma_req;
+typedef nccl_net_ofi_rdma_req nccl_net_ofi_rdma_req_t;
 
-typedef struct {
+/*
+ * @brief	RDMA request base class
+ *
+ * Base class for all RDMA request types. Contains common fields and virtual methods.
+ * Derived classes contain type-specific data (previously in union members).
+ */
+class nccl_net_ofi_rdma_req {
+public:
+	nccl_net_ofi_rdma_req(
+		nccl_net_ofi_rdma_req_type_t req_type,
+		nccl_net_ofi_comm_t *comm_ptr,
+		int device_id,
+		uint16_t seq_num);
+
+	virtual ~nccl_net_ofi_rdma_req() = default;
+	virtual int free(bool dec_inflight_reqs) = 0;
+
+	nccl_net_ofi_req_t base;
+	nccl_net_ofi_context_t ctx[MAX_NUM_RAILS];
+	nccl_net_ofi_comm_t *comm;
+	int dev_id;
+	uint16_t msg_seq_num;
+	int ncompls;
+	size_t size;
+
+	/*
+	 * Protect updating critical fields such as size and ncompls when
+	 * network xfer happened over multiple rails
+	 */
+	pthread_mutex_t req_lock;
+
+	nccl_net_ofi_rdma_req_state_t state;
+	nccl_net_ofi_rdma_req_type_t type;
+	nccl_ofi_freelist_elem_t *elem;
+};
+
+/*
+ * @brief	RX buffer request - data previously in rdma_req_rx_buff_data_t union member
+ */
+class rdma_req_rx_buff_data_t : public nccl_net_ofi_rdma_req {
+public:
+	rdma_req_rx_buff_data_t(nccl_net_ofi_comm_t *comm_ptr,
+				int device_id,
+				uint16_t seq_num);
+	~rdma_req_rx_buff_data_t() override;
+	int free(bool dec_inflight_reqs) override;
+
 	/* Rx buffer freelist item */
 	nccl_ofi_freelist_elem_t *rx_buff_fl_elem;
 	/* Length of rx buffer */
@@ -273,9 +322,20 @@ typedef struct {
 	 * Back-pointer to associated endpoint
 	 */
 	nccl_net_ofi_rdma_ep_t *ep;
-} rdma_req_rx_buff_data_t;
+};
 
-typedef struct {
+/*
+ * @brief	RMA operation request (read/write) - data previously in rdma_req_rma_op_data_t union member
+ */
+class rdma_req_rma_op_data_t : public nccl_net_ofi_rdma_req {
+public:
+	rdma_req_rma_op_data_t(nccl_net_ofi_rdma_req_type_t req_type,
+			       nccl_net_ofi_comm_t *comm_ptr,
+			       int device_id,
+			       uint16_t seq_num);
+	~rdma_req_rma_op_data_t() override;
+	int free(bool dec_inflight_reqs) override;
+
 	/* Remote destination buffer address */
 	uint64_t remote_buff;
 	/* Remote MR key */
@@ -294,9 +354,20 @@ typedef struct {
 	/* Number of rails where we have successfully posted the network xfer.
 	 * Used mostly when the network xfer is sliced across multiple rails */
 	uint16_t xferred_rail_id;
-} rdma_req_rma_op_data_t;
+};
 
-typedef struct {
+/*
+ * @brief	Send request - data previously in rdma_req_send_data_t union member
+ */
+class rdma_req_send_data_t : public nccl_net_ofi_rdma_req {
+public:
+	rdma_req_send_data_t(nccl_net_ofi_comm_t *comm_ptr,
+			     int device_id,
+			     uint16_t seq_num);
+	~rdma_req_send_data_t() override;
+	int free(bool dec_inflight_reqs) override;
+
+	/* Fields from old union member */
 	/* True for eager messages */
 	bool eager;
 	/* Remote destination buffer offset from base address */
@@ -322,49 +393,80 @@ typedef struct {
 	/* Number of rails where we have successfully posted the network xfer.
 	 * Used mostly when the network xfer is sliced across multiple rails */
 	uint16_t xferred_rail_id;
-	/* 
+	/*
 	 * Flag to indicate target side early completion, so that sender side
 	 * uses the corresponding RMA write operation.
-	 * True to use fi_write instead of fi_writedata in send() 
+	 * True to use fi_write instead of fi_writedata in send()
 	 */
 	bool no_target_completion;
 #if HAVE_NVTX_TRACING
 	nvtxRangeId_t trace_id;
 	nvtxRangeId_t seg_trace_id[MAX_NUM_RAILS];
 #endif
-} rdma_req_send_data_t;
+};
 
 /*
- * @brief	Data of request responsible for sending the close message
+ * @brief	Send close request - data previously in rdma_req_send_close_data_t union member
  */
-typedef struct {
+class rdma_req_send_close_data_t : public nccl_net_ofi_rdma_req {
+public:
+	rdma_req_send_close_data_t(nccl_net_ofi_comm_t *comm_ptr,
+				   int device_id,
+				   uint16_t seq_num);
+	~rdma_req_send_close_data_t() override;
+	int free(bool dec_inflight_reqs) override;
+
 	/* Pointer to the allocated control buffer from freelist */
 	nccl_ofi_freelist_elem_t *ctrl_fl_elem;
 	/* Schedule used to transfer the close buffer. We save the
 	 * pointer to reference it when transferring the buffer over
 	 * network. */
 	nccl_net_ofi_schedule_t *ctrl_schedule;
-} rdma_req_send_close_data_t;
+};
 
-typedef struct {
+/*
+ * @brief	Eager copy request - data previously in rdma_req_eager_copy_data_t union member
+ */
+class rdma_req_eager_copy_data_t : public nccl_net_ofi_rdma_req {
+public:
+	rdma_req_eager_copy_data_t(nccl_net_ofi_comm_t *comm_ptr,
+				   int device_id,
+				   uint16_t seq_num);
+	~rdma_req_eager_copy_data_t() override;
+	int free(bool dec_inflight_reqs) override;
+
 	/* Pointer to rx buffer containing eager data */
 	nccl_net_ofi_rdma_req_t *eager_rx_buff_req;
 	/* Pointer to recv parent request */
 	nccl_net_ofi_rdma_req_t *recv_req;
-} rdma_req_eager_copy_data_t;
+};
 
 /*
- * @brief	Data of request responsible for receiving segements
+ * @brief	Receive segments request - data previously in rdma_req_recv_segms_data_t union member
  */
-typedef struct {
+class rdma_req_recv_segms_data_t : public nccl_net_ofi_rdma_req {
+public:
+	rdma_req_recv_segms_data_t(nccl_net_ofi_comm_t *comm_ptr,
+				   int device_id,
+				   uint16_t seq_num);
+	~rdma_req_recv_segms_data_t() override;
+	int free(bool dec_inflight_reqs) override;
+
 	/* Pointer to recv parent request */
 	nccl_net_ofi_rdma_req_t *recv_req;
-} rdma_req_recv_segms_data_t;
+};
 
 /*
- * @brief	Data of request responsible for receive operation
+ * @brief	Receive request - data previously in rdma_req_recv_data_t union member
  */
-typedef struct {
+class rdma_req_recv_data_t : public nccl_net_ofi_rdma_req {
+public:
+	rdma_req_recv_data_t(nccl_net_ofi_comm_t *comm_ptr,
+			     int device_id,
+			     uint16_t seq_num);
+	~rdma_req_recv_data_t() override;
+	int free(bool dec_inflight_reqs) override;
+
 	/* Destination buffer */
 	void *dst_buff;
 	/* Destination length */
@@ -386,12 +488,19 @@ typedef struct {
 	nvtxRangeId_t trace_id;
 	nvtxRangeId_t write_ctrl_trace_id;
 #endif
-} rdma_req_recv_data_t;
+};
 
 /*
- * @brief	Data of request responsible for flush operatoin
+ * @brief	Flush request - data previously in rdma_req_flush_data_t union member
  */
-typedef struct {
+class rdma_req_flush_data_t : public nccl_net_ofi_rdma_req {
+public:
+	rdma_req_flush_data_t(nccl_net_ofi_comm_t *comm_ptr,
+			      int device_id,
+			      uint16_t seq_num);
+	~rdma_req_flush_data_t() override;
+	int free(bool dec_inflight_reqs) override;
+
 	/* Buffer to read flush data from */
 	void *data;
 	/* MR handles for the data buffer */
@@ -400,65 +509,83 @@ typedef struct {
 	nccl_ofi_freelist_elem_t *flush_fl_elem;
 	/* Total number of completions. Expect completions from all NIC rail */
 	int total_num_compls;
-} rdma_req_flush_data_t;
+};
 
 /*
- * @brief	RDMA request
+ * @brief	Calculate maximum size needed for request objects
+ *
+ * This is used to size the freelist entries to accommodate the largest derived class.
  */
-typedef struct nccl_net_ofi_rdma_req {
-	nccl_net_ofi_req_t base;
+constexpr size_t max_rdma_req_size() {
+	size_t max_size = sizeof(nccl_net_ofi_rdma_req);
+	max_size = std::max(max_size, sizeof(rdma_req_send_data_t));
+	max_size = std::max(max_size, sizeof(rdma_req_recv_data_t));
+	max_size = std::max(max_size, sizeof(rdma_req_rma_op_data_t));
+	max_size = std::max(max_size, sizeof(rdma_req_flush_data_t));
+	max_size = std::max(max_size, sizeof(rdma_req_send_close_data_t));
+	max_size = std::max(max_size, sizeof(rdma_req_eager_copy_data_t));
+	max_size = std::max(max_size, sizeof(rdma_req_recv_segms_data_t));
+	max_size = std::max(max_size, sizeof(rdma_req_rx_buff_data_t));
+	return max_size;
+}
 
-	nccl_net_ofi_context_t ctx[MAX_NUM_RAILS];
+#define NCCL_OFI_RDMA_MAX_REQ_SIZE max_rdma_req_size()
 
-	/* Associated Comm object */
-	nccl_net_ofi_comm_t *comm;
+/*
+ * @brief	Factory functions for type-safe request allocation
+ *
+ * These functions allocate memory from the freelist and use placement new
+ * to construct the appropriate request object in that memory.
+ * Defined in nccl_ofi_rdma.cpp
+ */
+rdma_req_send_data_t *allocate_rdma_send_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num);
 
-	/* Associated Device ID */
-	int dev_id;
+rdma_req_recv_data_t *allocate_rdma_recv_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num);
 
-	/* Message sequence number */
-	uint16_t msg_seq_num;
+rdma_req_rma_op_data_t *allocate_rdma_rma_op_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_rdma_req_type_t req_type,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num);
 
-	/* Number of arrived request completions */
-	int ncompls;
+rdma_req_flush_data_t *allocate_rdma_flush_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num);
 
-	union {
-		rdma_req_rma_op_data_t rma_op_data;
-		rdma_req_send_data_t send_data;
-		rdma_req_recv_data_t recv_data;
-		rdma_req_send_close_data_t send_close_data;
-		rdma_req_eager_copy_data_t eager_copy_data;
-		rdma_req_recv_segms_data_t recv_segms_data;
-		rdma_req_flush_data_t flush_data;
-		rdma_req_rx_buff_data_t rx_buff_data;
-	};
+rdma_req_send_close_data_t *allocate_rdma_send_close_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num);
 
-	/* Size of completed request */
-	size_t size;
+rdma_req_eager_copy_data_t *allocate_rdma_eager_copy_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num);
 
-	/*
-	 * Protect updating critical fields such as size and ncompls when
-	 * network xfer happened over multiple rails
-	 */
-	pthread_mutex_t req_lock;
+rdma_req_recv_segms_data_t *allocate_rdma_recv_segms_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num);
 
-	/* State of request */
-	nccl_net_ofi_rdma_req_state_t state;
-
-	/* Type of request */
-	nccl_net_ofi_rdma_req_type_t type;
-
-	/* Backpointer to freelist element */
-	nccl_ofi_freelist_elem_t *elem;
-
-	/* Deinitialzie and free request. This function returns error
-	 * in cases where cleanup fails. This function may also return
-	 * error if the owner of the request has to deallocate the
-	 * request by its own. */
-	int (*free)(nccl_net_ofi_rdma_req_t *req,
-		    bool dec_inflight_reqs);
-
-} nccl_net_ofi_rdma_req_t;
+rdma_req_rx_buff_data_t *allocate_rdma_rx_buff_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num);
 
 /*
  * Rdma endpoint name

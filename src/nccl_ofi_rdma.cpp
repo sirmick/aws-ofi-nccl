@@ -457,7 +457,7 @@ int nccl_net_ofi_rdma_device_t::get_properties(nccl_ofi_properties_t *props)
 static inline rdma_req_rx_buff_data_t *get_rx_buff_data(nccl_net_ofi_rdma_req_t *req) {
 	assert((req->type == NCCL_OFI_RDMA_CTRL_RX_BUFF) ||
 	       (req->type == NCCL_OFI_RDMA_EAGER_RX_BUFF));
-	return &req->rx_buff_data;
+	return static_cast<rdma_req_rx_buff_data_t *>(req);
 }
 
 /*
@@ -466,7 +466,7 @@ static inline rdma_req_rx_buff_data_t *get_rx_buff_data(nccl_net_ofi_rdma_req_t 
 static inline rdma_req_rma_op_data_t *req_get_rma_op_data(nccl_net_ofi_rdma_req_t *req,
 	nccl_net_ofi_rdma_req_type_t type) {
 	assert(req->type == type);
-	return &req->rma_op_data;
+	return static_cast<rdma_req_rma_op_data_t *>(req);
 }
 
 /*
@@ -474,7 +474,7 @@ static inline rdma_req_rma_op_data_t *req_get_rma_op_data(nccl_net_ofi_rdma_req_
  */
 static inline rdma_req_send_data_t *get_send_data(nccl_net_ofi_rdma_req_t *req) {
 	assert(req->type == NCCL_OFI_RDMA_SEND);
-	return &req->send_data;
+	return static_cast<rdma_req_send_data_t *>(req);
 }
 
 /*
@@ -482,7 +482,7 @@ static inline rdma_req_send_data_t *get_send_data(nccl_net_ofi_rdma_req_t *req) 
  */
 static inline rdma_req_recv_data_t *get_recv_data(nccl_net_ofi_rdma_req_t *req) {
 	assert(req->type == NCCL_OFI_RDMA_RECV);
-	return &req->recv_data;
+	return static_cast<rdma_req_recv_data_t *>(req);
 }
 
 /*
@@ -490,7 +490,7 @@ static inline rdma_req_recv_data_t *get_recv_data(nccl_net_ofi_rdma_req_t *req) 
  */
 static inline rdma_req_send_close_data_t *req_get_send_close_data(nccl_net_ofi_rdma_req_t *req) {
 	assert(req->type == NCCL_OFI_RDMA_SEND_CLOSE);
-	return &req->send_close_data;
+	return static_cast<rdma_req_send_close_data_t *>(req);
 }
 
 /*
@@ -498,7 +498,7 @@ static inline rdma_req_send_close_data_t *req_get_send_close_data(nccl_net_ofi_r
  */
 static inline rdma_req_eager_copy_data_t *get_eager_copy_data(nccl_net_ofi_rdma_req_t *req) {
 	assert(req->type == NCCL_OFI_RDMA_EAGER_COPY);
-	return &req->eager_copy_data;
+	return static_cast<rdma_req_eager_copy_data_t *>(req);
 }
 
 /*
@@ -506,7 +506,7 @@ static inline rdma_req_eager_copy_data_t *get_eager_copy_data(nccl_net_ofi_rdma_
  */
 static inline rdma_req_recv_segms_data_t *get_recv_segms_data(nccl_net_ofi_rdma_req_t *req) {
 	assert(req->type == NCCL_OFI_RDMA_RECV_SEGMS);
-	return &req->recv_segms_data;
+	return static_cast<rdma_req_recv_segms_data_t *>(req);
 }
 
 /*
@@ -514,7 +514,7 @@ static inline rdma_req_recv_segms_data_t *get_recv_segms_data(nccl_net_ofi_rdma_
  */
 static inline rdma_req_flush_data_t *get_flush_data(nccl_net_ofi_rdma_req_t *req) {
 	assert(req->type == NCCL_OFI_RDMA_FLUSH);
-	return &req->flush_data;
+	return static_cast<rdma_req_flush_data_t *>(req);
 }
 
 /*
@@ -842,7 +842,6 @@ static inline int alloc_eager_copy_req(nccl_net_ofi_rdma_req_t *recv_req, nccl_n
 	eager_copy_req->comm = &r_comm->base.base;
 	eager_copy_req->dev_id = recv_req->dev_id;
 	eager_copy_req->type = NCCL_OFI_RDMA_EAGER_COPY;
-	eager_copy_req->free = free_eager_copy_req;
 	eager_copy_req->msg_seq_num = recv_req->msg_seq_num;
 
 	rdma_req_eager_copy_data_t *eager_copy_data = get_eager_copy_data(eager_copy_req);
@@ -1143,7 +1142,7 @@ static inline int handle_flush_comp(nccl_net_ofi_rdma_req_t *req)
 			auto *r_comm = reinterpret_cast<nccl_net_ofi_rdma_recv_comm_t *>(req->comm);
 			r_comm->num_pending_flush_comps--;
 			assert(req->free);
-			req->free(req, true);
+			req->free(true);
 		} else {
 			req->state = NCCL_OFI_RDMA_REQ_COMPLETED;
 		}
@@ -1234,15 +1233,19 @@ static nccl_net_ofi_rdma_req_t *rdma_context_get_req(nccl_net_ofi_context_t *ctx
 		return NULL;
 	}
 
-	/* To find the request, we need to find the
-	 * start of the context array.  Since the
-	 * sender will always use its rail_id for the
-	 * ctx array index, we can do the same.
+	/* Use container_of to recover the request from the context pointer.
+	 * First, calculate the offset to ctx[0] by subtracting rail_id from the pointer.
+	 * Then use container_of to get the parent request structure.
+	 * This approach saves 32 bytes per request (8 bytes × 4 rails) compared to back-pointers.
+	 *
+	 * Note: offsetof on non-standard-layout types is conditionally-supported in C++17.
+	 * GCC and Clang both support this, and the warning is suppressed here.
 	 */
-	ctx -= rail_id;
-	return container_of(ctx,
-			    nccl_net_ofi_rdma_req_t,
-			    ctx);
+	nccl_net_ofi_context_t *ctx0 = ctx - rail_id;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+	return (nccl_net_ofi_rdma_req_t *)((char *)ctx0 - offsetof(nccl_net_ofi_rdma_req_t, ctx));
+#pragma GCC diagnostic pop
 }
 
 
@@ -1782,6 +1785,11 @@ static inline int free_base_req(uint64_t *num_inflight_reqs,
 	/* Zero out buffer */
 	zero_nccl_ofi_req(req);
 
+	/* Call destructor explicitly before returning memory to freelist.
+	 * This is required because freelists use placement new, so destructors
+	 * are not called automatically. */
+	req->~nccl_net_ofi_rdma_req();
+
 	nccl_ofi_freelist_entry_free(nccl_ofi_reqs_fl, elem);
 
 	/* Reduce inflight commands */
@@ -1872,7 +1880,7 @@ static inline int free_recv_req(nccl_net_ofi_rdma_req_t *req,
 	nccl_net_ofi_rdma_req_t *eager_copy_req = recv_data->eager_copy_req;
 
 	if (recv_segms_req) {
-		ret = recv_segms_req->free(recv_segms_req, false);
+		ret = recv_segms_req->free(false);
 		if (ret) {
 			NCCL_OFI_WARN("Failed to free receive request");
 			return ret;
@@ -1880,7 +1888,7 @@ static inline int free_recv_req(nccl_net_ofi_rdma_req_t *req,
 	}
 
 	if (eager_copy_req) {
-		ret = eager_copy_req->free(eager_copy_req, false);
+		ret = eager_copy_req->free(false);
 		if (ret) {
 			NCCL_OFI_WARN("Failed to free receive request");
 			return ret;
@@ -1995,7 +2003,6 @@ static inline nccl_net_ofi_rdma_req_t *eager_rx_buff_req_alloc(nccl_net_ofi_rdma
 	req->comm = NULL;
 	req->type = NCCL_OFI_RDMA_EAGER_RX_BUFF;
 	req->dev_id = ep->rdma_endpoint_get_device()->dev_id;
-	req->free = eager_rx_buff_req_free;
 
 	rdma_req_rx_buff_data_t *rx_buff_data = get_rx_buff_data(req);
 
@@ -2003,7 +2010,7 @@ static inline nccl_net_ofi_rdma_req_t *eager_rx_buff_req_alloc(nccl_net_ofi_rdma
 		nccl_ofi_freelist_entry_alloc(ep->eager_rx_buff_fl);
 	if (!rx_buff_fl_elem) {
 		NCCL_OFI_WARN("Failed to allocate rx_buff_fl_elem");
-		req->free(req, false);
+		req->free(false);
 		return NULL;
 	}
 	assert(NCCL_OFI_IS_PTR_ALIGNED(rx_buff_fl_elem->ptr, EAGER_RX_BUFFER_ALIGNMENT));
@@ -2037,7 +2044,6 @@ static inline nccl_net_ofi_rdma_req_t *ctrl_rx_buff_req_alloc(nccl_net_ofi_rdma_
 	req->comm = NULL;
 	req->type = NCCL_OFI_RDMA_CTRL_RX_BUFF;
 	req->dev_id = ep->rdma_endpoint_get_device()->dev_id;
-	req->free = ctrl_rx_buff_req_free;
 
 	rdma_req_rx_buff_data_t *rx_buff_data = get_rx_buff_data(req);
 
@@ -2045,7 +2051,7 @@ static inline nccl_net_ofi_rdma_req_t *ctrl_rx_buff_req_alloc(nccl_net_ofi_rdma_
 		nccl_ofi_freelist_entry_alloc(ep->ctrl_rx_buff_fl);
 	if (!rx_buff_fl_elem) {
 		NCCL_OFI_WARN("Failed to allocate rx_buff_fl_elem");
-		req->free(req, false);
+		req->free(false);
 		return NULL;
 	}
 
@@ -2489,7 +2495,7 @@ static int test(nccl_net_ofi_req_t *base_req, int *done, int *size)
 		}
 
 		assert(req->free);
-		req->free(req, true);
+		req->free(true);
 	} else if (OFI_UNLIKELY(req->state == NCCL_OFI_RDMA_REQ_ERROR)) {
 		ret = -EINVAL;
 		goto exit;
@@ -2826,7 +2832,225 @@ static int dereg_mr_recv_comm(nccl_net_ofi_recv_comm_t *recv_comm,
 }
 
 /*
- * @brief	Assign an allocated rdma request buffer
+ * @brief	Base class constructor implementation
+ *
+ * Initializes all common fields and sets up back-pointers in contexts.
+ */
+nccl_net_ofi_rdma_req::nccl_net_ofi_rdma_req(
+	nccl_net_ofi_rdma_req_type_t req_type,
+	nccl_net_ofi_comm_t *comm_ptr,
+	int device_id,
+	uint16_t seq_num)
+	: comm(comm_ptr), dev_id(device_id), msg_seq_num(seq_num), type(req_type)
+{
+	memset(&base, 0, sizeof(base));
+	memset(ctx, 0, sizeof(ctx));
+	ncompls = 0;
+	size = 0;
+	state = NCCL_OFI_RDMA_REQ_CREATED;
+	elem = NULL;
+
+	int ret = nccl_net_ofi_mutex_init(&req_lock, NULL);
+	if (ret != 0) {
+		NCCL_OFI_WARN("Failed to initialize request mutex");
+	}
+}
+
+/*
+ * @brief	Derived class constructors
+ */
+rdma_req_send_data_t::rdma_req_send_data_t(
+	nccl_net_ofi_comm_t *comm_ptr,
+	int device_id,
+	uint16_t seq_num)
+	: nccl_net_ofi_rdma_req(NCCL_OFI_RDMA_SEND, comm_ptr, device_id, seq_num)
+{
+	eager = false;
+	remote_buff_offset = 0;
+	remote_len = 0;
+	memset(remote_mr_key, 0, sizeof(remote_mr_key));
+	wdata = 0;
+	buff = NULL;
+	buff_len = 0;
+	buff_mr_handle = NULL;
+	schedule = NULL;
+	total_num_compls = 0;
+	xferred_rail_id = 0;
+	no_target_completion = false;
+#if HAVE_NVTX_TRACING
+	trace_id = 0;
+	memset(seg_trace_id, 0, sizeof(seg_trace_id));
+#endif
+}
+
+rdma_req_send_data_t::~rdma_req_send_data_t() {}
+
+rdma_req_recv_data_t::rdma_req_recv_data_t(
+	nccl_net_ofi_comm_t *comm_ptr,
+	int device_id,
+	uint16_t seq_num)
+	: nccl_net_ofi_rdma_req(NCCL_OFI_RDMA_RECV, comm_ptr, device_id, seq_num)
+{
+	dst_buff = NULL;
+	dst_len = 0;
+	dest_mr_handle = NULL;
+	recv_segms_req = NULL;
+	eager_copy_req = NULL;
+	total_num_compls = 0;
+#if HAVE_NVTX_TRACING
+	trace_id = 0;
+	write_ctrl_trace_id = 0;
+#endif
+}
+
+rdma_req_recv_data_t::~rdma_req_recv_data_t() {}
+
+rdma_req_rma_op_data_t::rdma_req_rma_op_data_t(
+	nccl_net_ofi_rdma_req_type_t req_type,
+	nccl_net_ofi_comm_t *comm_ptr,
+	int device_id,
+	uint16_t seq_num)
+	: nccl_net_ofi_rdma_req(req_type, comm_ptr, device_id, seq_num)
+{
+	remote_buff = 0;
+	remote_mr_key = 0;
+	buff = NULL;
+	buff_len = 0;
+	desc = NULL;
+	flags = 0;
+	total_num_compls = 0;
+	xferred_rail_id = 0;
+}
+
+rdma_req_rma_op_data_t::~rdma_req_rma_op_data_t() {}
+
+rdma_req_flush_data_t::rdma_req_flush_data_t(
+	nccl_net_ofi_comm_t *comm_ptr,
+	int device_id,
+	uint16_t seq_num)
+	: nccl_net_ofi_rdma_req(NCCL_OFI_RDMA_FLUSH, comm_ptr, device_id, seq_num)
+{
+	data = NULL;
+	mr_handle = NULL;
+	flush_fl_elem = NULL;
+	total_num_compls = 0;
+}
+
+rdma_req_flush_data_t::~rdma_req_flush_data_t() {}
+
+rdma_req_send_close_data_t::rdma_req_send_close_data_t(
+	nccl_net_ofi_comm_t *comm_ptr,
+	int device_id,
+	uint16_t seq_num)
+	: nccl_net_ofi_rdma_req(NCCL_OFI_RDMA_SEND_CLOSE, comm_ptr, device_id, seq_num)
+{
+	ctrl_fl_elem = NULL;
+	ctrl_schedule = NULL;
+}
+
+rdma_req_send_close_data_t::~rdma_req_send_close_data_t() {}
+
+rdma_req_eager_copy_data_t::rdma_req_eager_copy_data_t(
+	nccl_net_ofi_comm_t *comm_ptr,
+	int device_id,
+	uint16_t seq_num)
+	: nccl_net_ofi_rdma_req(NCCL_OFI_RDMA_EAGER_COPY, comm_ptr, device_id, seq_num)
+{
+	eager_rx_buff_req = NULL;
+	recv_req = NULL;
+}
+
+rdma_req_eager_copy_data_t::~rdma_req_eager_copy_data_t() {}
+
+rdma_req_recv_segms_data_t::rdma_req_recv_segms_data_t(
+	nccl_net_ofi_comm_t *comm_ptr,
+	int device_id,
+	uint16_t seq_num)
+	: nccl_net_ofi_rdma_req(NCCL_OFI_RDMA_RECV_SEGMS, comm_ptr, device_id, seq_num)
+{
+	recv_req = NULL;
+}
+
+rdma_req_recv_segms_data_t::~rdma_req_recv_segms_data_t() {}
+
+rdma_req_rx_buff_data_t::rdma_req_rx_buff_data_t(
+	nccl_net_ofi_comm_t *comm_ptr,
+	int device_id,
+	uint16_t seq_num)
+	: nccl_net_ofi_rdma_req(NCCL_OFI_RDMA_CTRL_RX_BUFF, comm_ptr, device_id, seq_num)
+{
+	rx_buff_fl_elem = NULL;
+	buff_len = 0;
+	recv_len = 0;
+	rail = NULL;
+	ep = NULL;
+}
+
+rdma_req_rx_buff_data_t::~rdma_req_rx_buff_data_t() {}
+
+/*
+ * @brief	Forward declarations for existing free functions
+ */
+static inline int free_send_req(nccl_net_ofi_rdma_req_t *req, bool dec_inflight_reqs);
+static inline int free_recv_req(nccl_net_ofi_rdma_req_t *req, bool dec_inflight_reqs);
+static inline int free_read_req(nccl_net_ofi_rdma_req_t *req, bool dec_inflight_reqs);
+static inline int free_write_req(nccl_net_ofi_rdma_req_t *req, bool dec_inflight_reqs);
+static inline int free_flush_req(nccl_net_ofi_rdma_req_t *req, bool dec_inflight_reqs);
+static inline int free_send_close_req(nccl_net_ofi_rdma_req_t *req, bool dec_inflight_reqs);
+static inline int free_eager_copy_req(nccl_net_ofi_rdma_req_t *req, bool dec_inflight_reqs);
+static inline int free_recv_segms_req(nccl_net_ofi_rdma_req_t *req, bool dec_inflight_reqs);
+static inline int eager_rx_buff_req_free(nccl_net_ofi_rdma_req_t *req, bool dec_inflight_reqs);
+static inline int ctrl_rx_buff_req_free(nccl_net_ofi_rdma_req_t *req, bool dec_inflight_reqs);
+
+/*
+ * @brief	Virtual free() method implementations
+ *
+ * These delegate to the existing static free_*_req functions.
+ */
+int rdma_req_send_data_t::free(bool dec_inflight_reqs) {
+	return free_send_req(this, dec_inflight_reqs);
+}
+
+int rdma_req_recv_data_t::free(bool dec_inflight_reqs) {
+	return free_recv_req(this, dec_inflight_reqs);
+}
+
+int rdma_req_rma_op_data_t::free(bool dec_inflight_reqs) {
+	/* RMA ops can be either read or write */
+	if (this->type == NCCL_OFI_RDMA_READ) {
+		return free_read_req(this, dec_inflight_reqs);
+	} else {
+		return free_write_req(this, dec_inflight_reqs);
+	}
+}
+
+int rdma_req_flush_data_t::free(bool dec_inflight_reqs) {
+	return free_flush_req(this, dec_inflight_reqs);
+}
+
+int rdma_req_send_close_data_t::free(bool dec_inflight_reqs) {
+	return free_send_close_req(this, dec_inflight_reqs);
+}
+
+int rdma_req_eager_copy_data_t::free(bool dec_inflight_reqs) {
+	return free_eager_copy_req(this, dec_inflight_reqs);
+}
+
+int rdma_req_recv_segms_data_t::free(bool dec_inflight_reqs) {
+	return free_recv_segms_req(this, dec_inflight_reqs);
+}
+
+int rdma_req_rx_buff_data_t::free(bool dec_inflight_reqs) {
+	/* RX buffers can be either ctrl or eager */
+	if (this->type == NCCL_OFI_RDMA_EAGER_RX_BUFF) {
+		return eager_rx_buff_req_free(this, dec_inflight_reqs);
+	} else {
+		return ctrl_rx_buff_req_free(this, dec_inflight_reqs);
+	}
+}
+
+/*
+ * @brief	Assign an allocated rdma request buffer (raw memory, no constructor)
  */
 static inline nccl_net_ofi_rdma_req_t *allocate_req(nccl_ofi_freelist_t *fl)
 {
@@ -2844,6 +3068,101 @@ static inline nccl_net_ofi_rdma_req_t *allocate_req(nccl_ofi_freelist_t *fl)
 	req->elem = elem;
 
 	return req;
+}
+
+/*
+ * @brief	Factory functions using placement new
+ *
+ * These allocate raw memory from the freelist and use placement new
+ * to construct the appropriate request type in that memory.
+ */
+rdma_req_send_data_t *allocate_rdma_send_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num)
+{
+	void *mem = allocate_req(fl);
+	if (OFI_UNLIKELY(mem == NULL)) return NULL;
+	return new (mem) rdma_req_send_data_t(comm, dev_id, msg_seq_num);
+}
+
+rdma_req_recv_data_t *allocate_rdma_recv_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num)
+{
+	void *mem = allocate_req(fl);
+	if (OFI_UNLIKELY(mem == NULL)) return NULL;
+	return new (mem) rdma_req_recv_data_t(comm, dev_id, msg_seq_num);
+}
+
+rdma_req_rma_op_data_t *allocate_rdma_rma_op_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_rdma_req_type_t req_type,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num)
+{
+	void *mem = allocate_req(fl);
+	if (OFI_UNLIKELY(mem == NULL)) return NULL;
+	return new (mem) rdma_req_rma_op_data_t(req_type, comm, dev_id, msg_seq_num);
+}
+
+rdma_req_flush_data_t *allocate_rdma_flush_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num)
+{
+	void *mem = allocate_req(fl);
+	if (OFI_UNLIKELY(mem == NULL)) return NULL;
+	return new (mem) rdma_req_flush_data_t(comm, dev_id, msg_seq_num);
+}
+
+rdma_req_send_close_data_t *allocate_rdma_send_close_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num)
+{
+	void *mem = allocate_req(fl);
+	if (OFI_UNLIKELY(mem == NULL)) return NULL;
+	return new (mem) rdma_req_send_close_data_t(comm, dev_id, msg_seq_num);
+}
+
+rdma_req_eager_copy_data_t *allocate_rdma_eager_copy_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num)
+{
+	void *mem = allocate_req(fl);
+	if (OFI_UNLIKELY(mem == NULL)) return NULL;
+	return new (mem) rdma_req_eager_copy_data_t(comm, dev_id, msg_seq_num);
+}
+
+rdma_req_recv_segms_data_t *allocate_rdma_recv_segms_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num)
+{
+	void *mem = allocate_req(fl);
+	if (OFI_UNLIKELY(mem == NULL)) return NULL;
+	return new (mem) rdma_req_recv_segms_data_t(comm, dev_id, msg_seq_num);
+}
+
+rdma_req_rx_buff_data_t *allocate_rdma_rx_buff_req(
+	nccl_ofi_freelist_t *fl,
+	nccl_net_ofi_comm_t *comm,
+	int dev_id,
+	uint16_t msg_seq_num)
+{
+	void *mem = allocate_req(fl);
+	if (OFI_UNLIKELY(mem == NULL)) return NULL;
+	return new (mem) rdma_req_rx_buff_data_t(comm, dev_id, msg_seq_num);
 }
 
 /**
@@ -2868,7 +3187,6 @@ static inline int insert_recv_segms_req(
 	recv_segms_req->comm = &r_comm->base.base;
 	recv_segms_req->dev_id = dev_id;
 	recv_segms_req->type = NCCL_OFI_RDMA_RECV_SEGMS;
-	recv_segms_req->free = free_recv_segms_req;
 	recv_segms_req->msg_seq_num = msg_seq_num;
 
 	rdma_req_recv_segms_data_t *recv_segms_data = get_recv_segms_data(recv_segms_req);
@@ -2907,7 +3225,6 @@ static inline int allocate_rdma_recv_req(
 	req->comm = &r_comm->base.base;
 	req->dev_id = dev_id;
 	req->type = NCCL_OFI_RDMA_RECV;
-	req->free = free_recv_req;
 	req->msg_seq_num = msg_seq_num;
 
 	recv_data = get_recv_data(req);
@@ -2988,7 +3305,7 @@ static inline int insert_rdma_recv_req_into_msgbuff(nccl_net_ofi_rdma_recv_comm_
 				 (msg_stat == NCCL_OFI_MSGBUFF_INPROGRESS))) {
 			/* Unlikely: an eager message was received on another
 			   thread. Return NULL and let NCCL call recv again. */
-			req->free(req, false);
+			req->free(false);
 			*ret_req = NULL;
 		} else if (OFI_UNLIKELY(mb_res != NCCL_OFI_MSGBUFF_SUCCESS)) {
 			NCCL_OFI_WARN("Unexpected result of nccl_ofi_msgbuff_insert for msg %hu",
@@ -3221,7 +3538,7 @@ static int recv(nccl_net_ofi_recv_comm_t *recv_comm, int n, void **buffers,
  free_req:
  error:
 	if (req)
-		req->free(req, false);
+		req->free(false);
 	*base_req = NULL;
  exit:
 	return ret;
@@ -3425,7 +3742,7 @@ static int recv_comm_destroy(nccl_net_ofi_rdma_recv_comm_t *r_comm)
 	}
 
 	if (r_comm->send_close_req != NULL) {
-		ret = r_comm->send_close_req->free(r_comm->send_close_req, false);
+		ret = r_comm->send_close_req->free(false);
 		if (ret != 0) {
 			return ret;
 		}
@@ -3497,7 +3814,6 @@ static inline int recv_comm_insert_send_close_req(nccl_net_ofi_rdma_recv_comm_t 
 	send_close_req->comm = &r_comm->base.base;
 	send_close_req->dev_id = r_comm->base.base.dev_id;
 	send_close_req->type = NCCL_OFI_RDMA_SEND_CLOSE;
-	send_close_req->free = free_send_close_req;
 	send_close_req->msg_seq_num = 0; /* Unimportant */
 
 	rdma_req_send_close_data_t *send_close_data = req_get_send_close_data(send_close_req);
@@ -3513,7 +3829,7 @@ static inline int recv_comm_insert_send_close_req(nccl_net_ofi_rdma_recv_comm_t 
 		(r_comm->ctrl_buff_fl);
 	if (send_close_data->ctrl_fl_elem == NULL) {
 		NCCL_OFI_WARN("Call to nccl_ofi_freelist_entry_alloc failed");
-		send_close_req->free(send_close_req, false);
+		send_close_req->free(false);
 		return -ENOMEM;
 	}
 
@@ -3924,7 +4240,6 @@ static int rdma_comm_alloc_flush_req(nccl_net_ofi_rdma_recv_comm_t *r_comm,
 	req->comm = &r_comm->base.base;
 	req->dev_id = dev_id;
 	req->type = NCCL_OFI_RDMA_FLUSH;
-	req->free = free_flush_req;
 
 	flush_data = get_flush_data(req);
 	flush_data->data = buff;
@@ -4050,7 +4365,7 @@ static int flush(nccl_net_ofi_recv_comm_t *recv_comm, int n, void **buffers,
 
  error:
 	if (req)
-		req->free(req, false);
+		req->free(false);
  exit:
 	*base_req = NULL;
 	return ret;
@@ -4148,7 +4463,6 @@ static int alloc_rdma_read_req(nccl_net_ofi_rdma_recv_comm_t *r_comm,
 		NCCL_OFI_WARN("Unable to get NCCL OFI request for device");
 		return -ENOMEM;
 	}
-	req->free = free_read_req;
 
 	init_rma_op_req(req, &r_comm->base.base, buff, size, desc, remote_buff,
 			remote_mr_key, flags, NCCL_OFI_RDMA_READ);
@@ -4224,7 +4538,7 @@ static int rma_read(nccl_net_ofi_recv_comm_t *recv_comm, void* dest, size_t size
 
  error:
 	if (req)
-		req->free(req, false);
+		req->free(false);
 	*base_req = NULL;
  exit:
 	return ret;
@@ -4958,7 +5272,7 @@ static int alloc_rdma_write_req(nccl_net_ofi_rdma_send_comm_t *s_comm,
 		NCCL_OFI_WARN("Unable to get NCCL OFI request for device");
 		return -ENOMEM;
 	}
-	req->free = free_write_req;
+
 	init_rma_op_req(req, &s_comm->base.base, buff, size, desc, remote_buff,
 			remote_mr_key, flags, NCCL_OFI_RDMA_WRITE);
 
@@ -4990,7 +5304,6 @@ static int alloc_rdma_send_req(nccl_net_ofi_rdma_send_comm_t *s_comm,
 	req->comm = &s_comm->base.base;
 	req->dev_id = s_comm->base.base.dev_id;
 	req->type = NCCL_OFI_RDMA_SEND;
-	req->free = free_send_req;
 	req->msg_seq_num = msg_seq_num;
 	req->size = size;
 
@@ -5542,7 +5855,7 @@ static inline int check_post_rx_buff_req(nccl_net_ofi_rdma_req_t *rx_buff_req)
 		/* Post more buffers if needed */
 		ret = ep->check_post_rx_buffers_rail(rail);
 	} else {
-		ret = rx_buff_req->free(rx_buff_req, false);
+		ret = rx_buff_req->free(false);
 		if (ret != 0) {
 			NCCL_OFI_WARN("Failed to free rx_buff_req");
 			return -EIO;
@@ -5702,7 +6015,7 @@ static int send(nccl_net_ofi_send_comm_t *send_comm, void *data, size_t size, in
 
  error:
 	if (req)
-		req->free(req, false);
+		req->free(false);
 	*base_req = NULL;
  exit:
 	return ret;
@@ -6048,7 +6361,7 @@ static int rma_write_impl(nccl_net_ofi_send_comm_t *send_comm, void* src, size_t
 
  error:
 	if (req)
-		req->free(req, false);
+		req->free(false);
 	*base_req = NULL;
  exit:
 	return ret;
